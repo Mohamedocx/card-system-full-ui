@@ -5,14 +5,21 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-import arabic_reshaper
 import pandas as pd
 import streamlit as st
 from barcode import Code128
 from barcode.writer import ImageWriter
-from bidi.algorithm import get_display
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from PyPDF2 import PdfReader, PdfWriter
+
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    ARABIC_LIBS_AVAILABLE = True
+except ModuleNotFoundError:
+    arabic_reshaper = None
+    get_display = None
+    ARABIC_LIBS_AVAILABLE = False
 
 
 st.set_page_config(page_title="نظام بطاقات الطلاب", page_icon="🪪", layout="wide")
@@ -51,6 +58,8 @@ def save_excel_file(df: pd.DataFrame, output_target=None):
 
 @st.cache_data(show_spinner=False)
 def reshape_arabic_text(text: str) -> str:
+    if not ARABIC_LIBS_AVAILABLE:
+        return str(text)
     reshaped = arabic_reshaper.reshape(str(text))
     return get_display(reshaped)
 
@@ -392,6 +401,9 @@ def build_system(
 
 st.title("🪪 نظام موحد لإنشاء بطاقات الطلاب")
 st.caption("رفع الإكسل + القالب + الخطوط + إخراج PNG و PDF من واجهة ويب واحدة")
+
+if not ARABIC_LIBS_AVAILABLE:
+    st.warning("مكتبات دعم العربية غير مثبتة في هذه البيئة. ثبّت الحزم من requirements.txt للحصول على تشكيل وعرض عربي صحيح.")
 
 with st.expander("فكرة النظام", expanded=True):
     st.markdown(

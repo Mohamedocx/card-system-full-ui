@@ -1,0 +1,8 @@
+streamlit>=1.28.0
+pandas>=1.5.0
+pillow>=9.0.0
+python-barcode>=0.14.0
+PyPDF2>=3.0.0
+python-bidi>=0.4.2
+arabic-reshaper>=0.6.0
+openpyxl>=3.1.0
