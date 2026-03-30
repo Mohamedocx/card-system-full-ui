@@ -115,6 +115,15 @@ def generate_barcode_image(serial: str, write_text: bool, module_height: int = 1
     return Image.open(barcode_buffer).convert("RGBA")
 
 
+def create_resized_barcode(serial: str, settings: dict) -> Image.Image:
+    barcode_img = generate_barcode_image(
+        serial,
+        write_text=settings["write_text_under_barcode"],
+        module_height=settings["barcode_module_height"],
+    )
+    return barcode_img.resize((settings["barcode_width"], settings["barcode_height"]))
+
+
 def open_image_uploaded(uploaded_file) -> Image.Image:
     return Image.open(uploaded_file).convert("RGBA")
 
@@ -171,12 +180,7 @@ def create_front_card(
         )
 
     if settings["draw_barcode"]:
-        barcode_img = generate_barcode_image(
-            serial,
-            write_text=settings["write_text_under_barcode"],
-            module_height=settings["barcode_module_height"],
-        )
-        barcode_img = barcode_img.resize((settings["barcode_width"], settings["barcode_height"]))
+        barcode_img = create_resized_barcode(serial, settings)
         base.paste(barcode_img, (settings["barcode_x"], settings["barcode_y"]), barcode_img)
 
     return base.convert("RGB")
@@ -318,10 +322,12 @@ def build_system(
     temp_root = Path(tempfile.mkdtemp(prefix="student_card_system_"))
     fronts_dir = temp_root / "front_cards"
     backs_dir = temp_root / "back_cards"
+    barcodes_dir = temp_root / "barcodes"
     pdf_dir = temp_root / "pdf"
 
     fronts_dir.mkdir(parents=True, exist_ok=True)
     backs_dir.mkdir(parents=True, exist_ok=True)
+    barcodes_dir.mkdir(parents=True, exist_ok=True)
     pdf_dir.mkdir(parents=True, exist_ok=True)
 
     arabic_font_bytes = arabic_font_file.getvalue() if arabic_font_file else None
@@ -331,6 +337,7 @@ def build_system(
 
     created_fronts = []
     created_backs = []
+    created_barcodes = []
 
     for index, row in df.iterrows():
         name = str(row[settings["name_column"]]).strip()
@@ -348,6 +355,12 @@ def build_system(
         front_path = fronts_dir / f"{index + 1}_{safe_serial}.png"
         save_card(front_card, front_path)
         created_fronts.append(front_path)
+
+        if settings["draw_barcode"]:
+            barcode_image = create_resized_barcode(serial, settings).convert("RGB")
+            barcode_path = barcodes_dir / f"{index + 1}_{safe_serial}.png"
+            save_card(barcode_image, barcode_path)
+            created_barcodes.append(barcode_path)
 
         if back_template_img is not None:
             back_card = create_back_card(back_template_img)
@@ -390,12 +403,14 @@ def build_system(
         "temp_root": temp_root,
         "fronts_dir": fronts_dir,
         "backs_dir": backs_dir,
+        "barcodes_dir": barcodes_dir,
         "front_pdf": front_pdf if front_pdf.exists() else None,
         "back_pdf": back_pdf if back_pdf.exists() else None,
         "merged_pdf": merged_pdf if merged_pdf.exists() else None,
         "zip_file": all_outputs_zip,
         "front_count": len(created_fronts),
         "back_count": len(created_backs),
+        "barcode_count": len(created_barcodes),
     }
 
 
@@ -596,10 +611,11 @@ if run:
 
             st.success("تم تنفيذ النظام بنجاح")
 
-            a, b, c = st.columns(3)
+            a, b, c, d = st.columns(4)
             a.metric("عدد بطاقات الوجه", result["front_count"])
             b.metric("عدد بطاقات الخلفية", result["back_count"])
-            c.metric("بطاقات لكل صفحة", int(cols) * int(rows))
+            c.metric("عدد الباركودات", result["barcode_count"])
+            d.metric("بطاقات لكل صفحة", int(cols) * int(rows))
 
             st.subheader("التحميل")
             with open(result["zip_file"], "rb") as f:
