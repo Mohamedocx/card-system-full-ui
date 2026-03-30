@@ -1,37 +1,29 @@
+import io
 import os
 import re
-import io
-import math
-import shutil
-import zipfile
 import tempfile
+import zipfile
 from pathlib import Path
 
+import arabic_reshaper
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont, ImageOps
 from barcode import Code128
 from barcode.writer import ImageWriter
-from PyPDF2 import PdfReader, PdfWriter
-import arabic_reshaper
 from bidi.algorithm import get_display
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PyPDF2 import PdfReader, PdfWriter
 
 
-# =========================
-# إعدادات عامة
-# =========================
 st.set_page_config(page_title="نظام بطاقات الطلاب", page_icon="🪪", layout="wide")
 
 DPI = 300
 A4_WIDTH = int(8.27 * DPI)
 A4_HEIGHT = int(11.69 * DPI)
 BACKGROUND_COLOR = "white"
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
+DEFAULT_EXCEL_PATH = Path(__file__).with_name("students.xlsx")
 
 
-# =========================
-# أدوات مساعدة
-# =========================
 def make_safe_filename(text: str) -> str:
     text = str(text).strip()
     text = re.sub(r'[<>:"/\\|?*]+', "_", text)
@@ -40,8 +32,21 @@ def make_safe_filename(text: str) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def read_excel_file(uploaded_file) -> pd.DataFrame:
-    return pd.read_excel(uploaded_file)
+def read_excel_file(file_source) -> pd.DataFrame:
+    return pd.read_excel(file_source)
+
+
+def save_excel_file(df: pd.DataFrame, output_target=None):
+    if isinstance(output_target, (str, Path)):
+        output_path = Path(output_target)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_excel(output_path, index=False)
+        return output_path
+
+    output_buffer = io.BytesIO()
+    df.to_excel(output_buffer, index=False)
+    output_buffer.seek(0)
+    return output_buffer.getvalue()
 
 
 @st.cache_data(show_spinner=False)
@@ -162,14 +167,8 @@ def create_front_card(
             write_text=settings["write_text_under_barcode"],
             module_height=settings["barcode_module_height"],
         )
-        barcode_img = barcode_img.resize(
-            (settings["barcode_width"], settings["barcode_height"])
-        )
-        base.paste(
-            barcode_img,
-            (settings["barcode_x"], settings["barcode_y"]),
-            barcode_img,
-        )
+        barcode_img = barcode_img.resize((settings["barcode_width"], settings["barcode_height"]))
+        base.paste(barcode_img, (settings["barcode_x"], settings["barcode_y"]), barcode_img)
 
     return base.convert("RGB")
 
@@ -213,7 +212,6 @@ def create_pages_from_images(
 
     usable_width = A4_WIDTH - (2 * page_margin_x) - ((cols - 1) * gap_x)
     usable_height = A4_HEIGHT - (2 * page_margin_y) - ((rows - 1) * gap_y)
-
     cell_w = usable_width // cols
     cell_h = usable_height // rows
 
@@ -279,6 +277,21 @@ def zip_folder(folder_path: Path, zip_path: Path):
                 zf.write(full_path, rel_path)
 
 
+def get_excel_source_key(excel_source) -> str:
+    if isinstance(excel_source, Path):
+        timestamp = excel_source.stat().st_mtime if excel_source.exists() else 0
+        return f"path:{excel_source.resolve()}:{timestamp}"
+    return f"upload:{excel_source.name}:{excel_source.size}"
+
+
+def load_editor_dataframe(excel_source) -> pd.DataFrame:
+    source_key = get_excel_source_key(excel_source)
+    if st.session_state.get("editor_source_key") != source_key:
+        st.session_state["editor_df"] = read_excel_file(excel_source).fillna("")
+        st.session_state["editor_source_key"] = source_key
+    return st.session_state["editor_df"].copy()
+
+
 def build_system(
     df: pd.DataFrame,
     front_template_file,
@@ -304,7 +317,6 @@ def build_system(
 
     arabic_font_bytes = arabic_font_file.getvalue() if arabic_font_file else None
     latin_font_bytes = latin_font_file.getvalue() if latin_font_file else None
-
     front_template_img = open_image_uploaded(front_template_file)
     back_template_img = open_image_uploaded(back_template_file) if back_template_file else None
 
@@ -378,9 +390,6 @@ def build_system(
     }
 
 
-# =========================
-# الواجهة
-# =========================
 st.title("🪪 نظام موحد لإنشاء بطاقات الطلاب")
 st.caption("رفع الإكسل + القالب + الخطوط + إخراج PNG و PDF من واجهة ويب واحدة")
 
@@ -398,29 +407,60 @@ left, right = st.columns([1, 1])
 
 with left:
     st.subheader("1) الملفات المطلوبة")
+    use_local_excel = False
+    if DEFAULT_EXCEL_PATH.exists():
+        use_local_excel = st.checkbox(
+            "استخدام ملف students.xlsx المحلي",
+            value=True,
+            help="عند التفعيل سيتم تحميل الملف المحلي ويمكنك حفظ التعديلات عليه مباشرة من داخل البرنامج.",
+        )
+        st.caption(f"الملف المحلي المتاح: {DEFAULT_EXCEL_PATH.name}")
+
     excel_file = st.file_uploader("ملف Excel", type=["xlsx", "xls"])
     front_template_file = st.file_uploader("قالب الوجه الأمامي", type=["png", "jpg", "jpeg"])
-    back_template_file = st.file_uploader(
-        "قالب الخلفية (اختياري)", type=["png", "jpg", "jpeg"]
-    )
-
-    arabic_font_file = st.file_uploader(
-        "خط عربي (اختياري - يفضل NeoSansArabic أو ما شابه)",
-        type=["ttf", "otf"],
-    )
-    latin_font_file = st.file_uploader(
-        "خط لاتيني/إنجليزي (اختياري)",
-        type=["ttf", "otf"],
-    )
+    back_template_file = st.file_uploader("قالب الخلفية (اختياري)", type=["png", "jpg", "jpeg"])
+    arabic_font_file = st.file_uploader("خط عربي (اختياري)", type=["ttf", "otf"])
+    latin_font_file = st.file_uploader("خط لاتيني/إنجليزي (اختياري)", type=["ttf", "otf"])
 
 with right:
-    st.subheader("2) معاينة البيانات")
-    if excel_file:
+    st.subheader("2) معاينة البيانات وتعديل الشيت")
+    excel_source = DEFAULT_EXCEL_PATH if use_local_excel and DEFAULT_EXCEL_PATH.exists() else excel_file
+
+    if excel_source is not None:
         try:
-            df_preview = read_excel_file(excel_file)
-            st.dataframe(df_preview.head(10), use_container_width=True)
+            editor_df = load_editor_dataframe(excel_source)
+            df_preview = st.data_editor(
+                editor_df,
+                use_container_width=True,
+                num_rows="dynamic",
+                key="student_sheet_editor",
+            ).fillna("")
+            st.session_state["editor_df"] = df_preview
+
             st.write(f"عدد السجلات: {len(df_preview)}")
             available_columns = list(df_preview.columns)
+
+            editor_col1, editor_col2 = st.columns(2)
+            if isinstance(excel_source, Path):
+                if editor_col1.button("حفظ التعديلات في students.xlsx", use_container_width=True):
+                    save_excel_file(df_preview, excel_source)
+                    read_excel_file.clear()
+                    st.session_state["editor_source_key"] = get_excel_source_key(excel_source)
+                    st.success("تم حفظ التعديلات داخل students.xlsx بنجاح.")
+            else:
+                edited_excel_bytes = save_excel_file(df_preview)
+                editor_col1.download_button(
+                    "تنزيل نسخة Excel المعدلة",
+                    data=edited_excel_bytes,
+                    file_name=f"edited_{excel_source.name}",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+
+            if editor_col2.button("إعادة تحميل الشيت", use_container_width=True):
+                read_excel_file.clear()
+                st.session_state["editor_df"] = read_excel_file(excel_source).fillna("")
+                st.rerun()
         except Exception as e:
             st.error(f"تعذر قراءة ملف الإكسل: {e}")
             available_columns = []
@@ -428,7 +468,7 @@ with right:
     else:
         available_columns = []
         df_preview = None
-        st.info("ارفع ملف Excel لعرض الأعمدة والمعاينة.")
+        st.info("ارفع ملف Excel أو فعّل الملف المحلي لعرض الأعمدة وتعديل الشيت مباشرة.")
 
 st.divider()
 
@@ -438,7 +478,7 @@ with c1:
     name_column = st.selectbox(
         "عمود الاسم",
         options=available_columns if available_columns else ["Name"],
-        index=0 if not available_columns else min(0, len(available_columns) - 1),
+        index=0,
     )
     serial_column = st.selectbox(
         "عمود الرقم/السيريال",
@@ -523,11 +563,14 @@ sheet_settings = {
 run = st.button("🚀 إنشاء النظام والملفات", type="primary", use_container_width=True)
 
 if run:
-    if excel_file is None or front_template_file is None:
+    if excel_source is None or front_template_file is None:
         st.error("ارفع ملف Excel وقالب الوجه الأمامي أولًا.")
     else:
         try:
-            df = read_excel_file(excel_file)
+            df = st.session_state.get("editor_df")
+            if df is None:
+                df = read_excel_file(excel_source).fillna("")
+
             with st.spinner("جاري إنشاء البطاقات والملفات..."):
                 result = build_system(
                     df=df,
@@ -539,7 +582,7 @@ if run:
                     sheet_settings=sheet_settings,
                 )
 
-            st.success("تم تنفيذ النظام بنجاح ✅")
+            st.success("تم تنفيذ النظام بنجاح")
 
             a, b, c = st.columns(3)
             a.metric("عدد بطاقات الوجه", result["front_count"])
@@ -549,7 +592,7 @@ if run:
             st.subheader("التحميل")
             with open(result["zip_file"], "rb") as f:
                 st.download_button(
-                    "⬇️ تحميل كل المخرجات ZIP",
+                    "تحميل كل المخرجات ZIP",
                     data=f.read(),
                     file_name="student_cards_outputs.zip",
                     mime="application/zip",
@@ -594,17 +637,17 @@ if run:
                 for i, file in enumerate(preview_files):
                     with preview_cols[i % 3]:
                         st.image(str(file), caption=file.name, use_container_width=True)
-
         except Exception as e:
             st.exception(e)
 
 st.divider()
 st.subheader("تشغيل محلي")
 st.code(
-    """pip install streamlit pandas pillow python-barcode openpyxl PyPDF2 arabic-reshaper python-bidi\nstreamlit run student_card_system.py""",
+    """pip install streamlit pandas pillow python-barcode openpyxl PyPDF2 arabic-reshaper python-bidi
+streamlit run student_card_system.py""",
     language="bash",
 )
 
 st.info(
-    "مهم: إذا أردت أن تكون الخلفية مختلفة لكل طالب أو تحتوي بيانات إضافية، يمكن توسيع نفس النظام بسهولة بإضافة إعدادات خاصة ببطاقة الخلفية."
+    "يمكنك الآن تعديل بيانات الشيت من داخل البرنامج مباشرة، ثم الحفظ إلى الملف المحلي أو تنزيل نسخة معدلة عند استخدام ملف مرفوع."
 )
