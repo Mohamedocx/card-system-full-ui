@@ -29,6 +29,9 @@ A4_WIDTH = int(8.27 * DPI)
 A4_HEIGHT = int(11.69 * DPI)
 BACKGROUND_COLOR = "white"
 DEFAULT_EXCEL_PATH = Path(__file__).with_name("students.xlsx")
+SELECTION_COLUMN = "تحديد"
+MANUAL_NAME_COLUMN = "الاسم"
+MANUAL_SERIAL_COLUMN = "الرقم المتسلسل"
 
 
 def make_safe_filename(text: str) -> str:
@@ -54,6 +57,19 @@ def save_excel_file(df: pd.DataFrame, output_target=None):
     df.to_excel(output_buffer, index=False)
     output_buffer.seek(0)
     return output_buffer.getvalue()
+
+
+def with_selection_column(df: pd.DataFrame) -> pd.DataFrame:
+    prepared_df = df.copy().fillna("")
+    if SELECTION_COLUMN not in prepared_df.columns:
+        prepared_df.insert(0, SELECTION_COLUMN, True)
+    else:
+        prepared_df[SELECTION_COLUMN] = prepared_df[SELECTION_COLUMN].fillna(True).astype(bool)
+    return prepared_df
+
+
+def without_selection_column(df: pd.DataFrame) -> pd.DataFrame:
+    return df.drop(columns=[SELECTION_COLUMN], errors="ignore").copy()
 
 
 @st.cache_data(show_spinner=False)
@@ -300,9 +316,17 @@ def get_excel_source_key(excel_source) -> str:
 def load_editor_dataframe(excel_source) -> pd.DataFrame:
     source_key = get_excel_source_key(excel_source)
     if st.session_state.get("editor_source_key") != source_key:
-        st.session_state["editor_df"] = read_excel_file(excel_source).fillna("")
+        st.session_state["editor_df"] = with_selection_column(read_excel_file(excel_source))
         st.session_state["editor_source_key"] = source_key
     return st.session_state["editor_df"].copy()
+
+
+def load_manual_dataframe() -> pd.DataFrame:
+    if "manual_editor_df" not in st.session_state:
+        st.session_state["manual_editor_df"] = with_selection_column(
+            pd.DataFrame([{MANUAL_NAME_COLUMN: "", MANUAL_SERIAL_COLUMN: ""}])
+        )
+    return st.session_state["manual_editor_df"].copy()
 
 
 def build_system(
@@ -434,8 +458,13 @@ left, right = st.columns([1, 1])
 
 with left:
     st.subheader("1) الملفات المطلوبة")
+    input_mode = st.radio(
+        "مصدر البيانات",
+        ["Excel", "إدخال مباشر"],
+        horizontal=True,
+    )
     use_local_excel = False
-    if DEFAULT_EXCEL_PATH.exists():
+    if input_mode == "Excel" and DEFAULT_EXCEL_PATH.exists():
         use_local_excel = st.checkbox(
             "استخدام ملف students.xlsx المحلي",
             value=True,
@@ -443,7 +472,11 @@ with left:
         )
         st.caption(f"الملف المحلي المتاح: {DEFAULT_EXCEL_PATH.name}")
 
-    excel_file = st.file_uploader("ملف Excel", type=["xlsx", "xls"])
+    excel_file = None
+    if input_mode == "Excel":
+        excel_file = st.file_uploader("ملف Excel", type=["xlsx", "xls"])
+    else:
+        st.caption("يمكنك كتابة الأسماء والأرقام المتسلسلة مباشرة من داخل الجدول بدون ملف Excel.")
     front_template_file = st.file_uploader("قالب الوجه الأمامي", type=["png", "jpg", "jpeg"])
     back_template_file = st.file_uploader("قالب الخلفية (اختياري)", type=["png", "jpg", "jpeg"])
     arabic_font_file = st.file_uploader("خط عربي (اختياري)", type=["ttf", "otf"])
@@ -451,9 +484,41 @@ with left:
 
 with right:
     st.subheader("2) معاينة البيانات وتعديل الشيت")
-    excel_source = DEFAULT_EXCEL_PATH if use_local_excel and DEFAULT_EXCEL_PATH.exists() else excel_file
+    excel_source = DEFAULT_EXCEL_PATH if input_mode == "Excel" and use_local_excel and DEFAULT_EXCEL_PATH.exists() else excel_file
 
-    if excel_source is not None:
+    if input_mode == "إدخال مباشر":
+        try:
+            editor_df = load_manual_dataframe()
+            df_preview = st.data_editor(
+                editor_df,
+                use_container_width=True,
+                num_rows="dynamic",
+                key="student_sheet_editor",
+            ).fillna("")
+            st.session_state["manual_editor_df"] = with_selection_column(df_preview)
+
+            st.write(f"عدد السجلات: {len(df_preview)}")
+            available_columns = list(df_preview.columns)
+
+            editor_col1, editor_col2 = st.columns(2)
+            manual_excel_bytes = save_excel_file(without_selection_column(df_preview))
+            editor_col1.download_button(
+                "تنزيل الإدخال كملف Excel",
+                data=manual_excel_bytes,
+                file_name="manual_students.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+            if editor_col2.button("إعادة ضبط الجدول اليدوي", use_container_width=True):
+                st.session_state["manual_editor_df"] = with_selection_column(
+                    pd.DataFrame([{MANUAL_NAME_COLUMN: "", MANUAL_SERIAL_COLUMN: ""}])
+                )
+                st.rerun()
+        except Exception as e:
+            st.error(f"تعذر تجهيز الإدخال اليدوي: {e}")
+            available_columns = []
+            df_preview = None
+    elif excel_source is not None:
         try:
             editor_df = load_editor_dataframe(excel_source)
             df_preview = st.data_editor(
@@ -462,20 +527,22 @@ with right:
                 num_rows="dynamic",
                 key="student_sheet_editor",
             ).fillna("")
-            st.session_state["editor_df"] = df_preview
+            st.session_state["editor_df"] = with_selection_column(df_preview)
 
             st.write(f"عدد السجلات: {len(df_preview)}")
             available_columns = list(df_preview.columns)
 
             editor_col1, editor_col2 = st.columns(2)
+            cleaned_df_preview = without_selection_column(df_preview)
             if isinstance(excel_source, Path):
                 if editor_col1.button("حفظ التعديلات في students.xlsx", use_container_width=True):
-                    save_excel_file(df_preview, excel_source)
+                    save_excel_file(cleaned_df_preview, excel_source)
                     read_excel_file.clear()
                     st.session_state["editor_source_key"] = get_excel_source_key(excel_source)
+                    st.session_state["editor_df"] = with_selection_column(cleaned_df_preview)
                     st.success("تم حفظ التعديلات داخل students.xlsx بنجاح.")
             else:
-                edited_excel_bytes = save_excel_file(df_preview)
+                edited_excel_bytes = save_excel_file(cleaned_df_preview)
                 editor_col1.download_button(
                     "تنزيل نسخة Excel المعدلة",
                     data=edited_excel_bytes,
@@ -486,7 +553,7 @@ with right:
 
             if editor_col2.button("إعادة تحميل الشيت", use_container_width=True):
                 read_excel_file.clear()
-                st.session_state["editor_df"] = read_excel_file(excel_source).fillna("")
+                st.session_state["editor_df"] = with_selection_column(read_excel_file(excel_source))
                 st.rerun()
         except Exception as e:
             st.error(f"تعذر قراءة ملف الإكسل: {e}")
@@ -495,24 +562,35 @@ with right:
     else:
         available_columns = []
         df_preview = None
-        st.info("ارفع ملف Excel أو فعّل الملف المحلي لعرض الأعمدة وتعديل الشيت مباشرة.")
+        st.info("ارفع ملف Excel أو فعّل الملف المحلي، أو اختر الإدخال المباشر لكتابة البيانات من داخل النظام.")
 
 st.divider()
 
 c1, c2, c3 = st.columns(3)
 with c1:
     st.subheader("3) ربط الأعمدة")
+    selectable_columns = [col for col in available_columns if col != SELECTION_COLUMN]
+    if input_mode == "إدخال مباشر":
+        default_name_options = selectable_columns if selectable_columns else [MANUAL_NAME_COLUMN]
+        default_name_index = default_name_options.index(MANUAL_NAME_COLUMN) if MANUAL_NAME_COLUMN in default_name_options else 0
+        default_serial_index = default_name_options.index(MANUAL_SERIAL_COLUMN) if MANUAL_SERIAL_COLUMN in default_name_options else min(1, len(default_name_options) - 1)
+    else:
+        default_name_options = selectable_columns if selectable_columns else ["Name"]
+        default_name_index = 0
+        default_serial_index = 1 if len(default_name_options) > 1 else 0
+
     name_column = st.selectbox(
         "عمود الاسم",
-        options=available_columns if available_columns else ["Name"],
-        index=0,
+        options=default_name_options,
+        index=default_name_index,
     )
     serial_column = st.selectbox(
         "عمود الرقم/السيريال",
-        options=available_columns if available_columns else ["Serial"],
-        index=1 if len(available_columns) > 1 else 0,
+        options=default_name_options,
+        index=default_serial_index,
     )
     reshape_arabic = st.checkbox("تفعيل تشكيل/معالجة العربية", value=True)
+    st.caption("استخدم عمود `تحديد` داخل الجدول لاختيار الكروت التي تريد حفظها فقط.")
 
 with c2:
     st.subheader("4) النصوص")
@@ -590,17 +668,37 @@ sheet_settings = {
 run = st.button("🚀 إنشاء النظام والملفات", type="primary", use_container_width=True)
 
 if run:
-    if excel_source is None or front_template_file is None:
-        st.error("ارفع ملف Excel وقالب الوجه الأمامي أولًا.")
+    if front_template_file is None:
+        st.error("ارفع قالب الوجه الأمامي أولًا.")
     else:
         try:
-            df = st.session_state.get("editor_df")
-            if df is None:
-                df = read_excel_file(excel_source).fillna("")
+            if input_mode == "إدخال مباشر":
+                df = st.session_state.get("manual_editor_df")
+                if df is None:
+                    df = load_manual_dataframe()
+            else:
+                if excel_source is None:
+                    st.error("ارفع ملف Excel أو فعّل الملف المحلي أولًا.")
+                    st.stop()
+                df = st.session_state.get("editor_df")
+                if df is None:
+                    df = with_selection_column(read_excel_file(excel_source))
+
+            df = with_selection_column(df).fillna("")
+            selected_df = df[df[SELECTION_COLUMN].fillna(False)].copy()
+            selected_df = without_selection_column(selected_df)
+            selected_df = selected_df[
+                selected_df[name_column].astype(str).str.strip().ne("")
+                & selected_df[serial_column].astype(str).str.strip().ne("")
+            ].copy()
+
+            if selected_df.empty:
+                st.error("لا توجد سجلات محددة وصالحة للتنفيذ. فعّل `تحديد` أمام الكروت المطلوبة واكتب الاسم والرقم المتسلسل.")
+                st.stop()
 
             with st.spinner("جاري إنشاء البطاقات والملفات..."):
                 result = build_system(
-                    df=df,
+                    df=selected_df,
                     front_template_file=front_template_file,
                     back_template_file=back_template_file,
                     arabic_font_file=arabic_font_file,
